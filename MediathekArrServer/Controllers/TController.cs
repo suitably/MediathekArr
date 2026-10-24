@@ -1,4 +1,4 @@
-using MediathekArr.Services;
+﻿using MediathekArr.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Text;
 
@@ -6,10 +6,11 @@ namespace MediathekArr.Controllers;
 
 [ApiController]
 [Route("api")]
-public class TController(MediathekSearchService mediathekSearchService, ItemLookupService itemLookupService) : ControllerBase
+public class TController(MediathekSearchService mediathekSearchService, ItemLookupService itemLookupService, MovieLookupService movieLookupService) : ControllerBase
 {
     private readonly MediathekSearchService _mediathekSearchService = mediathekSearchService;
     private readonly ItemLookupService _itemLookupService = itemLookupService;
+    private readonly MovieLookupService _movieLookupService = movieLookupService;
 
     [HttpGet]
     public async Task<IActionResult> GetCapsXml([FromQuery] string t)
@@ -64,7 +65,13 @@ public class TController(MediathekSearchService mediathekSearchService, ItemLook
                 }
                 else if (t == "movie" && !string.IsNullOrEmpty(imdbid))
                 {
-                    string searchResults = await _mediathekSearchService.FetchSearchResultsByImdbId(imdbid, limit, offset);
+                    // Without a TMDB token this returns an empty result instead of unrelated items
+                    string searchResults = await _mediathekSearchService.FetchMovieSearchResultsByImdbId(imdbid, limit, offset);
+                    return Content(searchResults, "application/xml", Encoding.UTF8);
+                }
+                else if (t == "movie" && _movieLookupService.IsEnabled && q is null && tmdbid is null)
+                {
+                    string searchResults = await _mediathekSearchService.FetchMovieSearchResultsForRssSync(limit, offset);
                     return Content(searchResults, "application/xml", Encoding.UTF8);
                 }
                 else if (q is null && season is null && imdbid is null && tvdbid is null && tmdbid is null)

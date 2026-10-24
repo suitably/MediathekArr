@@ -1,5 +1,4 @@
-﻿using MediathekArr.Models.Movies;
-using Microsoft.Extensions.Caching.Memory;
+﻿using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 
 namespace MediathekArr.Services;
@@ -8,7 +7,6 @@ public class ItemLookupService(IHttpClientFactory httpClientFactory, IConfigurat
 {
     private readonly HttpClient _httpClient = httpClientFactory.CreateClient();
     private readonly string _apiBaseUrl = configuration["MEDIATHEKARR_API_BASE_URL"] ?? "https://mediathekarr.pcjones.de/api/v1";
-    private readonly string _radarrMetadataBaseUrl = configuration["RADARR_METADATA_BASE_URL"] ?? "https://api.radarr.video/v1";
     private readonly IMemoryCache _memoryCache = memoryCache;
     private readonly ILogger<ItemLookupService> _logger = logger;
 
@@ -61,53 +59,5 @@ public class ItemLookupService(IHttpClientFactory httpClientFactory, IConfigurat
         _memoryCache.Set(cacheKey, tvdbInfo.Data, TimeSpan.FromHours(12));
 
         return tvdbInfo.Data;
-    }
-
-    public async Task<MovieInfo?> GetMovieInfoByImdbId(string? imdbid)
-    {
-        if (string.IsNullOrWhiteSpace(imdbid))
-        {
-            return null;
-        }
-
-        var imdbId = imdbid.StartsWith("tt", StringComparison.OrdinalIgnoreCase) ? imdbid.ToLowerInvariant() : $"tt{imdbid}";
-        var cacheKey = $"MovieInfo_{imdbId}";
-        if (_memoryCache.TryGetValue(cacheKey, out MovieInfo? cachedMovieInfo))
-        {
-            return cachedMovieInfo;
-        }
-
-        var response = await _httpClient.GetAsync($"{_radarrMetadataBaseUrl}/movie/imdb/{imdbId}");
-        if (!response.IsSuccessStatusCode)
-        {
-            _logger.LogError("Error fetching movie data for {ImdbId}: {StatusCode}", imdbId, response.StatusCode);
-            _memoryCache.Set(cacheKey, (MovieInfo?)null, TimeSpan.FromHours(1));
-            return null;
-        }
-
-        var jsonResponse = await response.Content.ReadAsStringAsync();
-        var movie = JsonSerializer.Deserialize<List<RadarrMovie>>(jsonResponse, GetJsonSerializerOptions())?.FirstOrDefault();
-        if (movie == null || string.IsNullOrEmpty(movie.Title))
-        {
-            _memoryCache.Set(cacheKey, (MovieInfo?)null, TimeSpan.FromHours(1));
-            return null;
-        }
-
-        // German titles first, the Mediathek mostly uses them
-        var searchTitles = new List<string?>();
-        searchTitles.AddRange(movie.Translations?.Where(t => t.Language == "de-DE").Select(t => t.Title) ?? []);
-        searchTitles.AddRange(movie.AlternativeTitles?.Where(t => t.Language == "de").Select(t => t.Title) ?? []);
-        searchTitles.Add(movie.Title);
-        searchTitles.Add(movie.OriginalTitle);
-
-        var movieInfo = new MovieInfo(
-            imdbId,
-            movie.Title,
-            movie.Year,
-            movie.Runtime,
-            [.. searchTitles.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase)]);
-
-        _memoryCache.Set(cacheKey, movieInfo, TimeSpan.FromHours(12));
-        return movieInfo;
     }
 }

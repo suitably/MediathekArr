@@ -1,5 +1,5 @@
 ﻿using MediathekArr.Models;
-using MediathekArr.Models.Movies;
+using MediathekArr.Models.Tmdb;
 using MediathekArr.Models.Newznab;
 using MediathekArr.Models.Rulesets;
 using MediathekArr.Utilities;
@@ -37,12 +37,12 @@ public partial class MediathekSearchFallbackHandler
     }
 
 
-    public static List<Item> GetMovieSearchResultItems(List<ApiResultItem> matchedItems, MovieInfo movie)
+    public static List<Item> GetMovieSearchResultItems(List<MatchedMovieInfo> matchedMovies)
     {
         var items = new List<Item>();
         string[] categories = ["2000"];
 
-        foreach (var item in matchedItems)
+        foreach (var (movie, item) in matchedMovies)
         {
             if (!string.IsNullOrEmpty(item.UrlVideoHd))
             {
@@ -144,7 +144,7 @@ public partial class MediathekSearchFallbackHandler
         }
         // Movies get a scene-style name (Title.Year.Language...) so Radarr can parse and match it
         var parsedTitle = movie != null
-            ? $"{movie.Title} {movie.Year}.{item.Language}.{quality}.WEB.h264-MEDiATHEK"
+            ? $"{movie.Title.Replace("&", "and")} {movie.Year}.{item.Language}.{quality}.WEB.h264-MEDiATHEK"
             : GenerateTitle(tvdbData, item.Topic, item.Title, quality, formattedDate, season, episode);
         var formattedTitle = FormatTitle(parsedTitle);
         //var translatedTitle = TranslateTitle(formattedTitle, tvdbData);
@@ -159,6 +159,7 @@ public partial class MediathekSearchFallbackHandler
         if (movie != null)
         {
             attributes.Add(new Models.Newznab.Attribute { Name = "imdb", Value = movie.ImdbId[2..] });
+            attributes.Add(new Models.Newznab.Attribute { Name = "tmdbid", Value = movie.TmdbId.ToString() });
         }
 
         return new Item

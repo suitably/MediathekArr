@@ -1,4 +1,4 @@
-using MediathekArr.Utilities;
+﻿using MediathekArr.Utilities;
 using MediathekArr.Services;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Scalar.AspNetCore;
@@ -25,8 +25,14 @@ builder.Services.TryAddTransient<HttpClientLoggingHandler>();
 builder.Services.AddHostedService<RulesetBackgroundService>();
 builder.Services.AddSingleton<MediathekSearchService>();
 builder.Services.AddSingleton<ItemLookupService>();
+builder.Services.AddSingleton<MovieLookupService>();
 
 var app = builder.Build();
+
+if (!app.Services.GetRequiredService<MovieLookupService>().IsEnabled)
+{
+    app.Logger.LogWarning("TMDB_API_TOKEN is not set, movie search (Radarr) is disabled");
+}
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

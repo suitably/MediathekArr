@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using MediathekArr.Models;
 using MediathekArr.Models.Newznab;
 using MediathekArr.Models.Rulesets;
+using MediathekArr.Models.Tmdb;
 using MediathekArr.Utilities;
 using Microsoft.Extensions.Caching.Memory;
 using Guid = MediathekArr.Models.Newznab.Guid;
@@ -13,10 +14,11 @@ using MatchType = MediathekArr.Models.Rulesets.MatchType;
 
 namespace MediathekArr.Services;
 
-public partial class MediathekSearchService(IHttpClientFactory httpClientFactory, IMemoryCache cache, ItemLookupService itemLookupService, ILogger<MediathekSearchService> logger)
+public partial class MediathekSearchService(IHttpClientFactory httpClientFactory, IMemoryCache cache, ItemLookupService itemLookupService, MovieLookupService movieLookupService, ILogger<MediathekSearchService> logger)
 {
     private readonly IMemoryCache _cache = cache;
     private readonly ItemLookupService _itemLookupService = itemLookupService;
+    private readonly MovieLookupService _movieLookupService = movieLookupService;
     private readonly HttpClient _httpClient = httpClientFactory.CreateClient("MediathekClient");
     private readonly ILogger<MediathekSearchService> _logger = logger;
     private readonly TimeSpan _cacheTimeSpan = TimeSpan.FromMinutes(55);
@@ -854,7 +856,7 @@ public partial class MediathekSearchService(IHttpClientFactory httpClientFactory
         return newznabRssResponse;
     }
 
-    public async Task<string> FetchSearchResultsByImdbId(string imdbid, int limit, int offset)
+    public async Task<string> FetchMovieSearchResultsByImdbId(string imdbid, int limit, int offset)
     {
         var cacheKey = $"imdb_{imdbid}_{limit}_{offset}";
         if (_cache.TryGetValue(cacheKey, out string? cachedResponse))
@@ -862,7 +864,7 @@ public partial class MediathekSearchService(IHttpClientFactory httpClientFactory
             return cachedResponse ?? "";
         }
 
-        var movie = await _itemLookupService.GetMovieInfoByImdbId(imdbid);
+        var movie = await _movieLookupService.GetMovieInfoByImdbId(imdbid);
         if (movie == null)
         {
             // Never fall back to an unfiltered search, Radarr would get unrelated items
@@ -877,66 +879,83 @@ public partial class MediathekSearchService(IHttpClientFactory httpClientFactory
         }
 
         var normalizedSearchTitles = movie.SearchTitles
-            .SelectMany(t => new[] { NormalizeMovieTitle(t), NormalizeMovieTitle(CutMovieTitleSuffix(t)) })
+            .SelectMany(t => new[] { MovieTitleUtils.Normalize(t), MovieTitleUtils.Normalize(MovieTitleUtils.CutTitleSuffix(t)) })
             .Where(t => t.Length > 2)
             .ToHashSet();
+
+        // Exact title match (up to " - " or "("), so sequels like "Der Pate II" do not match "Der Pate"
         var matchedItems = results
             .DistinctBy(item => (item.UrlWebsite, item.Title, item.UrlVideo))
             .Where(item => !ShouldSkipItem(item))
-            .Where(item => MatchesMovieRuntime(item, movie.Runtime))
-            .Where(item => MatchesMovieYear(item, movie.Year))
-            // Exact title match (up to " - " or "("), so sequels like "Der Pate II" do not match "Der Pate"
-            .Where(item => normalizedSearchTitles.Contains(NormalizeMovieTitle(item.Title))
-                || normalizedSearchTitles.Contains(NormalizeMovieTitle(CutMovieTitleSuffix(item.Title))))
+            .Where(item => MovieTitleUtils.MatchesRuntime(item.Duration, movie.Runtime))
+            .Where(item => MovieTitleUtils.MatchesYear(MovieTitleUtils.ExtractYear(item.Title, item.Description), movie.Year))
+            .Where(item => normalizedSearchTitles.Contains(MovieTitleUtils.Normalize(item.Title))
+                || normalizedSearchTitles.Contains(MovieTitleUtils.Normalize(MovieTitleUtils.CutTitleSuffix(item.Title))))
+            .Select(item => new MatchedMovieInfo(movie, item))
             .ToList();
 
-        _logger.LogInformation("Movie search for {ImdbId} ({Title} {Year}): {Count} of {Total} Mediathek items matched: {Matches}", movie.ImdbId, movie.Title, movie.Year, matchedItems.Count, results.Count,
-            string.Join("; ", matchedItems.Select(item => $"{item.Channel}: {item.Title} ({item.Duration / 60} min)")));
+        _logger.LogInformation("Movie search for {ImdbId} ({Title} {Year}): {Count} Mediathek items matched", movie.ImdbId, movie.Title, movie.Year, matchedItems.Count);
 
-        var newznabItems = MediathekSearchFallbackHandler.GetMovieSearchResultItems(matchedItems, movie);
+        var newznabItems = MediathekSearchFallbackHandler.GetMovieSearchResultItems(matchedItems);
         var newznabRssResponse = ConvertNewznabItemsToRss(newznabItems, limit, offset);
 
         _cache.Set(cacheKey, newznabRssResponse, _cacheTimeSpan);
         return newznabRssResponse;
     }
 
-    private static bool MatchesMovieRuntime(ApiResultItem item, int runtimeMinutes)
+    public async Task<string> FetchMovieSearchResultsForRssSync(int limit, int offset)
     {
-        if (runtimeMinutes <= 0)
+        var cacheKey = $"rss_movies_{limit}_{offset}";
+        if (_cache.TryGetValue(cacheKey, out string? cachedResponse))
         {
-            return item.Duration >= 60 * 60;
+            return cachedResponse ?? "";
         }
 
-        // TV versions are often a bit shorter (PAL speed-up, cut credits)
-        var runtimeSeconds = runtimeMinutes * 60;
-        return item.Duration >= runtimeSeconds * 0.8 && item.Duration <= runtimeSeconds * 1.2;
-    }
-
-    // "Der Pate - Spielfilm, USA 1972" -> "Der Pate", "Michael Clayton (mit Untertitel)" -> "Michael Clayton"
-    private static string CutMovieTitleSuffix(string title)
-    {
-        var cutIndex = new[] { title.IndexOf(" - ", StringComparison.Ordinal), title.IndexOf(" – ", StringComparison.Ordinal), title.IndexOf('(') }
-            .Where(i => i > 0)
-            .DefaultIfEmpty(title.Length)
-            .Min();
-        return title[..cutIndex];
-    }
-
-    // If the Mediathek title names a production year ("Spielfilm, USA 1972"), it has to fit the movie
-    private static bool MatchesMovieYear(ApiResultItem item, int year)
-    {
-        var titleYears = MovieYearRegex().Matches(item.Title).Select(m => int.Parse(m.Value)).ToList();
-        return year <= 0 || titleYears.Count == 0 || titleYears.Any(y => Math.Abs(y - year) <= 1);
-    }
-
-    private static string NormalizeMovieTitle(string? title)
-    {
-        if (string.IsNullOrEmpty(title))
+        var mediathekViewRequestCacheKey = "rss_mediathekview_results";
+        List<ApiResultItem> results;
+        if (_cache.TryGetValue(mediathekViewRequestCacheKey, out List<ApiResultItem>? cachedResults))
         {
-            return string.Empty;
+            results = cachedResults ?? [];
+        }
+        else
+        {
+            results = await FetchMediathekViewApiResponseAsync([], 10000);
+            _cache.Set(mediathekViewRequestCacheKey, results, TimeSpan.FromMinutes(20));
         }
 
-        return new string(title.ToLowerInvariant().Replace("&", "und").Where(char.IsLetterOrDigit).ToArray());
+        var movieCandidates = results
+            .Where(item => MovieTitleUtils.IsMovieTopic(item.Topic) && !ShouldSkipItem(item) && item.Duration >= 60 * 60)
+            .ToList();
+
+        // Look up each title only once, TMDB results are cached for days
+        var lookups = movieCandidates
+            .Select(item => (Title: MovieTitleUtils.CutTitleSuffix(item.Title), Year: MovieTitleUtils.ExtractYear(item.Title, item.Description), item.Duration))
+            .DistinctBy(candidate => (candidate.Title, candidate.Year))
+            .ToList();
+
+        var foundMovies = new ConcurrentDictionary<(string Title, int? Year), MovieInfo>();
+        await Parallel.ForEachAsync(lookups, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (candidate, _) =>
+        {
+            var movie = await _movieLookupService.FindMovieByTitle(candidate.Title, candidate.Year, candidate.Duration);
+            if (movie != null)
+            {
+                foundMovies[(candidate.Title, candidate.Year)] = movie;
+            }
+        });
+
+        var matchedItems = movieCandidates
+            .Select(item => foundMovies.TryGetValue((MovieTitleUtils.CutTitleSuffix(item.Title), MovieTitleUtils.ExtractYear(item.Title, item.Description)), out var movie) ? new MatchedMovieInfo(movie, item) : null)
+            .OfType<MatchedMovieInfo>()
+            .Where(matched => MovieTitleUtils.MatchesRuntime(matched.Item.Duration, matched.Movie.Runtime))
+            .ToList();
+
+        _logger.LogInformation("Movie RSS sync: {Count} of {Candidates} Mediathek movie items matched on TMDB", matchedItems.Count, movieCandidates.Count);
+
+        var newznabItems = MediathekSearchFallbackHandler.GetMovieSearchResultItems(matchedItems);
+        var newznabRssResponse = ConvertNewznabItemsToRss(newznabItems, limit, offset);
+
+        _cache.Set(cacheKey, newznabRssResponse, _cacheTimeSpan);
+        return newznabRssResponse;
     }
 
     private List<Item> GenerateRssItems(MatchedEpisodeInfo matchedEpisodeInfo)
@@ -1101,6 +1120,4 @@ public partial class MediathekSearchService(IHttpClientFactory httpClientFactory
     private static partial Regex StaticSeasonRegex();
     [GeneratedRegex(@"^E\d{1,4}$")]
     private static partial Regex StaticEpisodeRegex();
-    [GeneratedRegex(@"\b(19|20)\d{2}\b")]
-    private static partial Regex MovieYearRegex();
 }
