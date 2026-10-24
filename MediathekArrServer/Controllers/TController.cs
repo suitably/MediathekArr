@@ -62,6 +62,11 @@ public class TController(MediathekSearchService mediathekSearchService, ItemLook
 
                     return Content(searchResults, "application/xml", Encoding.UTF8);
                 }
+                else if (t == "movie" && !string.IsNullOrEmpty(imdbid))
+                {
+                    string searchResults = await _mediathekSearchService.FetchSearchResultsByImdbId(imdbid, limit, offset);
+                    return Content(searchResults, "application/xml", Encoding.UTF8);
+                }
                 else if (q is null && season is null && imdbid is null && tvdbid is null && tmdbid is null)
                 {
                     string searchResults = await _mediathekSearchService.FetchSearchResultsForRssSync(limit, offset);

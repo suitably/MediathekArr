@@ -1,4 +1,5 @@
 ﻿using MediathekArr.Models;
+using MediathekArr.Models.Movies;
 using MediathekArr.Models.Newznab;
 using MediathekArr.Models.Rulesets;
 using MediathekArr.Utilities;
@@ -35,6 +36,32 @@ public partial class MediathekSearchFallbackHandler
         return unmatchedFilteredResultItems.SelectMany(item => GenerateRssItems(item, season, null)).ToList() ?? [];
     }
 
+
+    public static List<Item> GetMovieSearchResultItems(List<ApiResultItem> matchedItems, MovieInfo movie)
+    {
+        var items = new List<Item>();
+        string[] categories = ["2000"];
+
+        foreach (var item in matchedItems)
+        {
+            if (!string.IsNullOrEmpty(item.UrlVideoHd))
+            {
+                items.Add(CreateRssItem(item, null, null, null, null, "1080p", 1.75, "Movies > HD", [.. categories, "2040"], item.UrlVideoHd, movie: movie));
+            }
+
+            if (!string.IsNullOrEmpty(item.UrlVideo))
+            {
+                items.Add(CreateRssItem(item, null, null, null, null, "720p", 1.0, "Movies > HD", [.. categories, "2040"], item.UrlVideo, movie: movie));
+            }
+
+            if (!string.IsNullOrEmpty(item.UrlVideoLow))
+            {
+                items.Add(CreateRssItem(item, null, null, null, null, "480p", 0.4, "Movies > SD", [.. categories, "2030"], item.UrlVideoLow, movie: movie));
+            }
+        }
+
+        return items;
+    }
 
     private static List<Item> GenerateRssItems(ApiResultItem item, string? season, string? episode, Models.Tvdb.Data? tvdbData = null)
     {
@@ -83,7 +110,7 @@ public partial class MediathekSearchFallbackHandler
         return items;
     }
 
-    private static Item CreateRssItem(ApiResultItem item, string? yearSeason, string? season, string? episode, Models.Tvdb.Data? tvdbData, string quality, double sizeMultiplier, string category, string[] categoryValues, string url, string? formattedDate = null)
+    private static Item CreateRssItem(ApiResultItem item, string? yearSeason, string? season, string? episode, Models.Tvdb.Data? tvdbData, string quality, double sizeMultiplier, string category, string[] categoryValues, string url, string? formattedDate = null, MovieInfo? movie = null)
     {
         var adjustedSize = (long)(item.Size * sizeMultiplier);
 
@@ -115,7 +142,10 @@ public partial class MediathekSearchFallbackHandler
         {
             adjustedSize += 15000000; // Add 15MB to size if subs are available
         }
-        var parsedTitle = GenerateTitle(tvdbData, item.Topic, item.Title, quality, formattedDate, season, episode);
+        // Movies get a scene-style name (Title.Year.Language...) so Radarr can parse and match it
+        var parsedTitle = movie != null
+            ? $"{movie.Title} {movie.Year}.{item.Language}.{quality}.WEB.h264-MEDiATHEK"
+            : GenerateTitle(tvdbData, item.Topic, item.Title, quality, formattedDate, season, episode);
         var formattedTitle = FormatTitle(parsedTitle);
         //var translatedTitle = TranslateTitle(formattedTitle, tvdbData);
         var translatedTitle = formattedTitle; // TODO see if translation is needed
@@ -125,6 +155,12 @@ public partial class MediathekSearchFallbackHandler
 
         // Generate the full URL for the fake_nzb_download endpoint
         var fakeDownloadUrl = $"/api/fake_nzb_download?encodedVideoUrl={encodedVideoUrl}&encodedSubtitleUrl={encodedSubtitleUrl}&encodedTitle={encodedTitle}";
+        var attributes = NewznabUtils.GenerateAttributes(item, yearSeason ?? season, episode, categoryValues, formattedDate == null ? EpisodeType.Standard : EpisodeType.Daily);
+        if (movie != null)
+        {
+            attributes.Add(new Models.Newznab.Attribute { Name = "imdb", Value = movie.ImdbId[2..] });
+        }
+
         return new Item
         {
             Title = translatedTitle,
@@ -144,7 +180,7 @@ public partial class MediathekSearchFallbackHandler
                 Length = adjustedSize,
                 Type = "application/x-nzb"
             },
-            Attributes = NewznabUtils.GenerateAttributes(item, yearSeason ?? season, episode, categoryValues, formattedDate == null ? EpisodeType.Standard : EpisodeType.Daily)
+            Attributes = attributes
         };
     }
 
